@@ -3,9 +3,7 @@
 
 ## Overview
 
-This repository contains the complete R code for benchmarking four cell-type annotation methods on 45 lung adenocarcinoma (LUAD) spatial transcriptomics (10x Visium) samples. The four methods evaluated are Seurat-based label transfer (RPCA), CARD, RCTD (spacexr), and SPOTlight.
-
-The analysis includes cell-type composition comparison, correlation and RMSE assessment, spatial autocorrelation (Moran's I and LISA), neighborhood enrichment analysis, module score evaluation, and gene expression gradient analysis.
+This repository contains the complete R code for benchmarking four cell-type annotation methods on 45 lung adenocarcinoma (LUAD) spatial transcriptomics (10x Visium) samples. The four methods evaluated are Seurat-based label transfer (RPCA), CARD, RCTD (spacexr), and SPOTlight. The analysis includes cell-type composition comparison, correlation and RMSE assessment, spatial autocorrelation (Moran's I and LISA), neighborhood enrichment analysis, module score evaluation, and gene expression gradient analysis. All codes could be seen in the script. 
 
 ---
 
