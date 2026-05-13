@@ -1,3 +1,4 @@
+library(AUCell)
 library(circlize)
 library(CARD)
 library(ComplexHeatmap)
@@ -5,6 +6,7 @@ library(dplyr)
 library(FNN)
 library(ggplot2)
 library(ggpubr)
+library(harmony)
 library(Matrix)
 library(patchwork)
 library(reshape2)
@@ -1697,3 +1699,896 @@ Heatmap(neglogp_matrix,
         heatmap_legend_param = list(title = "-log10(p)", direction = "horizontal"))
 dev.off()
 saveRDS(all_celltype_res, file.path(dir_result, "all_celltype_results.rds"))
+
+all_celltype_res=readRDS(file.path(dir_result, "all_celltype_results.rds"))
+get_genes_shared_by_2methods <- function(all_celltype_res, celltype, 
+                                         methods = c("seurat_trans", "card", "rctd", "spotlight"),
+                                         fdr_cutoff = 0.1) {
+  method_genes <- list()
+  for(m in methods) {
+    if(m %in% names(all_celltype_res) && 
+       celltype %in% names(all_celltype_res[[m]])) {
+      df <- all_celltype_res[[m]][[celltype]]
+      if(!is.null(df) && nrow(df) > 0) {
+        sig_genes <- df$gene[df$FDR < fdr_cutoff & !is.na(df$FDR)]
+        method_genes[[m]] <- sig_genes
+      }
+    }
+  }
+  if(length(method_genes) < 2) return(character(0))
+  all_sig <- unique(unlist(method_genes))
+  keep <- c()
+  for(gene in all_sig) {
+    count <- sum(sapply(method_genes, function(x) gene %in% x))
+    if(count >= 1) keep <- c(keep, gene)
+  }
+  return(keep)
+}
+celltypes <- c("Myeloid", "Endothelial", "Stroma", "T_NK", "Plasma", "Mast", "B")
+sig_genes_by_celltype <- list()
+for(ct in celltypes) {
+  sig_genes_by_celltype[[ct]] <- get_genes_shared_by_2methods(all_celltype_res, ct)
+  cat(ct, ":", length(sig_genes_by_celltype[[ct]]), "genes\n")
+}
+sig_endo <- sig_genes_by_celltype[["Endothelial"]]
+sig_myeloid <- sig_genes_by_celltype[["Myeloid"]]
+sig_stroma <- sig_genes_by_celltype[["Stroma"]]
+sig_tnk <- sig_genes_by_celltype[["T_NK"]]
+sig_plasma <- sig_genes_by_celltype[["Plasma"]]
+sig_mast <- sig_genes_by_celltype[["Mast"]]
+sig_b <- sig_genes_by_celltype[["B"]]
+sig_bpc <- union(sig_plasma, sig_b)
+
+####scrna validation####
+dir_path <- "/Users/mingkewu/Documents/R/benchmark/scraw"
+list.files(dir_path)
+expr_matrix <- readRDS(file.path(dir_path, "GSE131907_Lung_Cancer_normalized_log2TPM_matrix.rds"))
+cell_anno <- read.table(file.path(dir_path, "GSE131907_Lung_Cancer_cell_annotation.txt"), header = TRUE, sep = "\t", row.names = 1, comment.char = "", quote = "", fill = TRUE)
+seurat_obj <- CreateSeuratObject(counts = expr_matrix, meta.data = cell_anno)
+seurat_obj <- subset(seurat_obj, subset = Sample %in% 
+                       c("LUNG_T06", "LUNG_T08", "LUNG_T09", "LUNG_T18", "LUNG_T19", "LUNG_T20", "LUNG_T25", "LUNG_T28", "LUNG_T30",
+                         "LUNG_T31", "LUNG_T34", 
+                         "LUNG_N01", "LUNG_N06", "LUNG_N08", "LUNG_N09", "LUNG_N18", "LUNG_N19", "LUNG_N20", 
+                         "LUNG_N28", "LUNG_N30", "LUNG_N31", "LUNG_N34"))
+sce <- readRDS("~/Documents/R/lung/lung_all2.RDS")
+query <- seurat_obj
+query <- NormalizeData(query)
+query <- FindVariableFeatures(query)
+anchors <- FindTransferAnchors(reference = sce, query = query, reduction = "rpca", dims = 1:30)
+predictions <- TransferData(anchorset = anchors, refdata = sce$anno, dims = 1:30)
+query <- AddMetaData(query, metadata = predictions)
+table(query$predicted.id)
+query <- ScaleData(query)
+query <- RunPCA(query)
+query <- RunHarmony(query, group.by.vars = "Sample")
+query <- RunUMAP(query, reduction = "harmony", dims = 1:30)
+query$predicted.id <- gsub("-", ".", query$predicted.id)
+custom_colors <- c(
+  "AT1.like" = "#ce6d87",
+  "AT2.like" = "#a08582", 
+  "B" = "#a48441",
+  "Endothelial" = "#869846",
+  "Epi.like" = "#465439",
+  "Mast" = "#55A372",
+  "Myeloid" = "#6191c2",
+  "Plasma" = "#404f69",
+  "Stroma" = "#9b79c0",
+  "T_NK" = "#6a366d"
+)  
+query$cancer <- ifelse(query$Sample %in% c("LUNG_T06", "LUNG_T08", "LUNG_T09", "LUNG_T18", "LUNG_T19", "LUNG_T20", "LUNG_T25", "LUNG_T28", "LUNG_T30", "LUNG_T31", "LUNG_T34"), "tumor", "ctrl")
+table(query$cancer)
+table(query$predicted.id)
+saveRDS(query,file.path(dir_path, "sc_val_anno.rds"))
+p=DimPlot(query, group.by = "predicted.id", cols = custom_colors)
+dir_result <- "~/Documents/R/benchmark/result/"
+ggsave(file.path(dir_result , "scumap.pdf"), p, width = 10, height = 8,dpi = 600)
+marker.genes <- list(
+  "AT1-like" = c("AGER", "CAV1", "EMP2", "PDPN"),
+  "AT2-like" = c("SFTPA1", "SFTPA2", "SFTPC", "NAPSA"),
+  "Epi-like" = c("EPCAM", "KRT8", "KRT18", "KRT19"),
+  "Endothelial" = c("PECAM1", "VWF", "EMCN", "KDR"),
+  "Stroma" = c("COL1A1", "COL1A2", "DCN", "LUM"),
+  "Plasma" = c("JCHAIN", "MZB1", "SDC1", "IGHG1"),
+  "Mast" = c("TPSAB1", "KIT", "CPA3", "MS4A2"),
+  "B" = c("CD79A", "MS4A1", "CD74", "HLA-DRA"),
+  "Myeloid" = c("LYZ", "C1QC", "CTSB", "FCER1G"),
+  "T_NK" = c("CD3D", "NKG7", "GNLY", "TRBC1")
+)
+all_markers <- unlist(marker.genes)
+all_markers=as.character(all_markers)
+query$predicted.id <- factor(query$predicted.id, 
+                             levels = c("AT1.like", "AT2.like", "Epi.like", 
+                                        "Endothelial", "Stroma", 
+                                        "Plasma", "Mast", "B", "Myeloid", "T_NK"))
+DotPlot(query, features = all_markers, group.by = "predicted.id") +
+  scale_color_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+cells <- subset(query, predicted.id == "T_NK")
+cells <- subset(query, predicted.id == "Myeloid")
+cells <- subset(query, predicted.id == "Stroma")
+cells <- subset(query, predicted.id == "Endothelial")
+cells <- subset(query, predicted.id %in% c("B","Plasma"))
+cells <- subset(query, predicted.id %in% c("Mast"))
+expr_matrix <- as.matrix(GetAssayData(cells, layer = "counts"))
+gene_set <- list(sig = sig_tnk)
+gene_set <- list(sig = sig_myeloid)
+gene_set <- list(sig = sig_stroma)
+gene_set <- list(sig = sig_endo)
+gene_set <- list(sig = sig_bpc)
+gene_set <- list(sig = sig_mast)
+cells_auc <- AUCell_run(expr_matrix, gene_set)
+score_raw <- cells_auc@assays@data@listData$AUC[1, ]
+genes_avail <- intersect(sig_stroma, rownames(cells))
+expr_data <- GetAssayData(cells, layer = "data")
+cells_with_expr <- colSums(expr_data[genes_avail, ] > 0) > 0
+plot_df <- data.frame(
+  score = score_raw,
+  group = cells$cancer
+)
+plot_df <- plot_df[cells_with_expr, ]
+wilcox_result <- wilcox.test(score ~ group, data = plot_df)
+p_value <- wilcox_result$p.value
+p_label <- p_value 
+max_score <- max(plot_df$score)
+y_position <- max_score * 1.05
+ggplot(plot_df, aes(x = group, y = score, fill = group)) +
+  geom_boxplot() +
+  theme_classic() +
+  labs(x = "Group", y = "AUCell Score") +
+  theme(legend.position = "none") +
+  annotate("text", x = 1.5, y = y_position, label = p_label, size = 4) +
+  annotate("segment", x = 1, xend = 2, y = y_position * 0.98, yend = y_position * 0.98)
+
+####tf activity####
+methods <- c("seurat_trans", "card", "rctd", "spotlight")
+custom_colors <- c(
+  "AT1.like" = "#ce6d87",
+  "AT2.like" = "#a08582", 
+  "B" = "#a48441",
+  "Endothelial" = "#869846",
+  "Epi.like" = "#465439",
+  "Myeloid" = "#6191c2",
+  "Plasma" = "#404f69",
+  "Stroma" = "#9b79c0",
+  "T_NK" = "#6a366d"
+)
+
+spe <- JoinLayers(spe)
+spe <- NormalizeData(spe)
+
+counts_mat <- GetAssayData(spe, assay = "Spatial", layer = "counts")
+
+cell_group_mapping <- data.frame(
+  original_celltype = names(custom_colors),
+  new_group = c("Tumor", "Tumor", "BPC", "Endothelial", "Tumor", "Myeloid", "BPC", "Stroma", "T_NK"),
+  stringsAsFactors = FALSE
+)
+
+for(method in methods) {
+  spe[[paste0(method, "_group")]] <- cell_group_mapping$new_group[match(spe[[method]][,1], cell_group_mapping$original_celltype)]
+}
+
+new_groups <- c("Tumor", "BPC", "T_NK", "Stroma", "Endothelial", "Myeloid")
+method_order <- c("seurat_trans", "card", "rctd", "spotlight")
+
+pseudo_bulk_list <- list()
+for(method in methods) {
+  for(group in new_groups) {
+    cells_keep <- which(spe[[paste0(method, "_group")]][,1] == group)
+    if(length(cells_keep) >= 3) {
+      pseudo_name <- paste(method, group, sep = "|")
+      pseudo_bulk_list[[pseudo_name]] <- rowMeans(counts_mat[, cells_keep])
+    }
+  }
+}
+pseudo_matrix <- do.call(cbind, pseudo_bulk_list)
+
+net <- decoupleR::get_collectri(organism = 'human', split_complexes = FALSE)
+acts <- decoupleR::run_ulm(mat = pseudo_matrix, net = net, .source = 'source', .target = 'target', .mor = 'mor', minsize = 5)
+
+tf_scores <- acts %>%
+  dplyr::select(source, condition, score) %>%
+  tidyr::pivot_wider(id_cols = source, names_from = condition, values_from = score) %>%
+  tibble::column_to_rownames("source") %>%
+  as.matrix()
+
+all_combined <- list()
+for(method in methods) {
+  for(group in new_groups) {
+    col_name <- paste(method, group, sep = "|")
+    if(col_name %in% colnames(tf_scores)) {
+      temp_df <- data.frame(
+        method = method,
+        cell_type = group,
+        source = rownames(tf_scores),
+        score = tf_scores[, col_name],
+        stringsAsFactors = FALSE
+      )
+      all_combined[[paste(method, group, sep = "|")]] <- temp_df
+    }
+  }
+}
+all_combined <- bind_rows(all_combined)
+
+method_order <- c("seurat_trans", "card", "rctd", "spotlight")
+cell_type_order <- c("Tumor", "BPC", "T_NK", "Stroma", "Endothelial", "Myeloid")
+
+top_tfs_per_method_celltype <- all_combined %>%
+  dplyr::group_by(method, cell_type) %>%
+  dplyr::slice_max(order_by = abs(score), n = 15, with_ties = FALSE) %>%
+  dplyr::ungroup()
+
+tf_order <- top_tfs_per_method_celltype %>%
+  dplyr::arrange(match(cell_type, cell_type_order), match(method, method_order), desc(abs(score))) %>%
+  dplyr::pull(source) %>%
+  unique()
+
+plot_data_filtered <- all_combined %>% dplyr::filter(source %in% tf_order)
+
+plot_data_filtered <- plot_data_filtered %>%
+  dplyr::mutate(
+    cell_type = factor(cell_type, levels = cell_type_order),
+    method = factor(method, levels = method_order)
+  )
+
+y_order <- c()
+for(ct in cell_type_order) {
+  for(md in method_order) {
+    y_order <- c(y_order, paste(ct, md, sep = "|"))
+  }
+}
+
+plot_data_filtered <- plot_data_filtered %>%
+  dplyr::mutate(celltype_method = paste(cell_type, method, sep = "|"),
+                celltype_method = factor(celltype_method, levels = y_order))
+
+score_matrix <- plot_data_filtered %>%
+  dplyr::select(celltype_method, source, score) %>%
+  tidyr::pivot_wider(id_cols = celltype_method, names_from = source, values_from = score) %>%
+  tibble::column_to_rownames("celltype_method") %>%
+  as.matrix()
+
+score_matrix[is.na(score_matrix)] <- 0
+
+score_matrix <- score_matrix[, tf_order, drop = FALSE]
+
+melted_data <- reshape2::melt(score_matrix)
+colnames(melted_data) <- c("CellType_Method", "TF", "Score")
+
+melted_data <- melted_data %>%
+  tidyr::separate(CellType_Method, into = c("CellType", "Method"), sep = "\\|", remove = FALSE)
+
+max_size <- 0.8
+
+p <- ggplot(melted_data, aes(x = factor(TF, levels = tf_order), y = CellType_Method)) + 
+  geom_tile(aes(fill = Score), color = "grey50", linewidth = 0.5, 
+            width = pmin(abs(melted_data$Score)/5, max_size), 
+            height = pmin(abs(melted_data$Score)/5, max_size)) + 
+  scale_fill_gradient2(low = "navy", mid = "white", high = "#FF69B4", 
+                       midpoint = 0, limits = c(-30,30), oob = scales::squish, 
+                       name = "TF Activity") + 
+  scale_y_discrete(limits = y_order, labels = function(x) {
+    parts <- strsplit(x, "\\|")
+    sapply(parts, function(p) p[2])
+  }) +
+  theme_minimal(base_size = 12) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, face = "bold", size = 9), 
+        axis.text.y = element_text(face = "bold", size = 8), 
+        panel.grid = element_blank(), 
+        axis.title = element_blank(), 
+        legend.title = element_text(face = "bold", size = 10), 
+        legend.text = element_text(size = 9), 
+        plot.title = element_text(face = "bold", size = 14, hjust = 0.5), 
+        plot.background = element_rect(fill = "white", color = NA), 
+        plot.margin = margin(10, 10, 10, 10)) + 
+  geom_tile(aes(x = factor(TF, levels = tf_order), y = CellType_Method), color = "grey80", linewidth = 0.2, 
+            fill = NA, width = 1, height = 1) + 
+  coord_fixed(ratio = 0.8) 
+print(p)
+
+tf_list <- c("PLAGL2",  "RXRG",   "FOXF2",
+             "TBXT","GSC","HLX",
+             "HOXA7","SRSF2","JUN",
+             "SMAD3","SCX","ZBTB7B",
+             "ETV5","ZNF91","TGFB1I1",
+             "AEBP1","ZIC2","VSX2"
+)
+method_order <- c("seurat_trans", "card", "rctd", "spotlight")
+cell_type_order <- c("Tumor", "BPC", "T_NK", "Stroma", "Endothelial", "Myeloid")
+
+plot_data_filtered <- all_combined %>% dplyr::filter(source %in% tf_list)
+
+plot_data_filtered <- plot_data_filtered %>%
+  dplyr::mutate(
+    cell_type = factor(cell_type, levels = cell_type_order),
+    method = factor(method, levels = method_order)
+  )
+
+y_order <- c()
+for(ct in cell_type_order) {
+  for(md in method_order) {
+    y_order <- c(y_order, paste(ct, md, sep = "|"))
+  }
+}
+
+plot_data_filtered <- plot_data_filtered %>%
+  dplyr::mutate(celltype_method = paste(cell_type, method, sep = "|"),
+                celltype_method = factor(celltype_method, levels = y_order))
+
+score_matrix <- plot_data_filtered %>%
+  dplyr::select(celltype_method, source, score) %>%
+  tidyr::pivot_wider(id_cols = celltype_method, names_from = source, values_from = score) %>%
+  tibble::column_to_rownames("celltype_method") %>%
+  as.matrix()
+
+score_matrix[is.na(score_matrix)] <- 0
+
+score_matrix <- score_matrix[, tf_list, drop = FALSE]
+
+melted_data <- reshape2::melt(score_matrix)
+colnames(melted_data) <- c("CellType_Method", "TF", "Score")
+
+melted_data <- melted_data %>%
+  tidyr::separate(CellType_Method, into = c("CellType", "Method"), sep = "\\|", remove = FALSE)
+
+max_size <- 0.8
+
+p <- ggplot(melted_data, aes(x = factor(TF, levels = tf_list), y = CellType_Method)) + 
+  geom_tile(aes(fill = Score), color = "grey50", linewidth = 0.5, 
+            width = pmin(abs(melted_data$Score)/5, max_size), 
+            height = pmin(abs(melted_data$Score)/5, max_size)) + 
+  scale_fill_gradient2(low = "navy", mid = "white", high = "#FF69B4", 
+                       midpoint = 0, limits = c(-30, 30), oob = scales::squish, 
+                       name = "TF Activity") + 
+  scale_y_discrete(limits = y_order, labels = function(x) {
+    parts <- strsplit(x, "\\|")
+    sapply(parts, function(p) p[2])
+  }) +
+  theme_minimal(base_size = 12) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, face = "bold", size = 9), 
+        axis.text.y = element_text(face = "bold", size = 8), 
+        panel.grid = element_blank(), 
+        axis.title = element_blank(), 
+        legend.title = element_text(face = "bold", size = 10), 
+        legend.text = element_text(size = 9), 
+        plot.title = element_text(face = "bold", size = 14, hjust = 0.5), 
+        plot.background = element_rect(fill = "white", color = NA), 
+        plot.margin = margin(10, 10, 10, 10)) + 
+  geom_tile(aes(x = factor(TF, levels = tf_list), y = CellType_Method), color = "grey80", linewidth = 0.2, 
+            fill = NA, width = 1, height = 1) + 
+  coord_fixed(ratio = 0.8) + 
+  ggtitle("TF Activities across Cell Types and Methods")
+
+print(p)
+
+####scrna tf val####
+sce=readRDS(file.path(dir_path, "sc_val_anno.rds"))
+table(sce$cancer)
+table(sce$predicted.id)
+sce <- JoinLayers(sce)
+sce <- NormalizeData(sce)
+
+sce$cancer_status <- sce$cancer
+custom_colors <- c(
+  "AT1.like" = "#ce6d87",
+  "AT2.like" = "#a08582", 
+  "B" = "#a48441",
+  "Endothelial" = "#869846",
+  "Epi.like" = "#465439",
+  "Myeloid" = "#6191c2",
+  "Plasma" = "#404f69",
+  "Stroma" = "#9b79c0",
+  "T_NK" = "#6a366d"
+)
+cell_group_mapping <- data.frame(
+  original_celltype = names(custom_colors),
+  new_group = c("Tumor", "Tumor", "BPC", "Endothelial", "Tumor", "Myeloid", "BPC", "Stroma", "T_NK"),
+  stringsAsFactors = FALSE
+)
+
+sce$cell_group <- cell_group_mapping$new_group[match(sce$predicted.id, cell_group_mapping$original_celltype)]
+
+counts_mat <- GetAssayData(sce, assay = "RNA", layer = "counts")
+
+pseudo_bulk_list <- list()
+for(cancer_status in c("ctrl", "tumor")) {
+  for(group in c("Tumor", "BPC", "T_NK", "Stroma", "Endothelial", "Myeloid")) {
+    cells_keep <- which(sce$cancer_status == cancer_status & sce$cell_group == group)
+    if(length(cells_keep) >= 3) {
+      pseudo_name <- paste(cancer_status, group, sep = "|")
+      pseudo_bulk_list[[pseudo_name]] <- rowMeans(counts_mat[, cells_keep])
+    }
+  }
+}
+
+pseudo_matrix <- do.call(cbind, pseudo_bulk_list)
+
+net <- decoupleR::get_collectri(organism = 'human', split_complexes = FALSE)
+
+acts <- decoupleR::run_ulm(mat = pseudo_matrix, net = net, .source = 'source', .target = 'target', .mor = 'mor', minsize = 5)
+
+tf_scores <- acts %>%
+  dplyr::select(source, condition, score) %>%
+  tidyr::pivot_wider(id_cols = source, names_from = condition, values_from = score) %>%
+  tibble::column_to_rownames("source") %>%
+  as.matrix()
+
+all_combined_sce <- list()
+for(cancer_status in c("ctrl", "tumor")) {
+  for(group in c("Tumor", "BPC", "T_NK", "Stroma", "Endothelial", "Myeloid")) {
+    col_name <- paste(cancer_status, group, sep = "|")
+    if(col_name %in% colnames(tf_scores)) {
+      temp_df <- data.frame(
+        cancer_status = cancer_status,
+        cell_type = group,
+        source = rownames(tf_scores),
+        score = tf_scores[, col_name],
+        stringsAsFactors = FALSE
+      )
+      all_combined_sce[[paste(cancer_status, group, sep = "|")]] <- temp_df
+    }
+  }
+}
+
+all_combined_sce <- bind_rows(all_combined_sce)
+tf_list <- c("PLAGL2",  "RXRG",   "FOXF2",
+             "TBXT","GSC","HLX",
+             "HOXA7","SRSF2","JUN",
+             "SMAD3","SCX","ZBTB7B",
+             "ETV5","ZNF91","TGFB1I1",
+             "AEBP1","ZIC2","VSX2"
+)
+
+cell_type_order <- c("Tumor", "BPC", "T_NK", "Stroma", "Endothelial", "Myeloid")
+
+plot_data <- all_combined_sce %>%
+  dplyr::filter(cancer_status == "tumor" & source %in% tf_list) %>%
+  dplyr::select(cell_type, source, score)
+
+plot_data <- plot_data %>%
+  dplyr::mutate(cell_type = factor(cell_type, levels = cell_type_order))
+
+score_matrix <- plot_data %>%
+  dplyr::select(cell_type, source, score) %>%
+  tidyr::pivot_wider(id_cols = cell_type, names_from = source, values_from = score) %>%
+  tibble::column_to_rownames("cell_type") %>%
+  as.matrix()
+
+score_matrix[is.na(score_matrix)] <- 0
+
+score_matrix <- score_matrix[, tf_list, drop = FALSE]
+
+melted_data <- reshape2::melt(score_matrix)
+colnames(melted_data) <- c("CellType", "TF", "Score")
+
+max_size <- 0.8
+
+p <- ggplot(melted_data, aes(x = factor(TF, levels = tf_list), y = CellType)) + 
+  geom_tile(aes(fill = Score), color = "grey50", linewidth = 0.5, 
+            width = pmin(abs(melted_data$Score)/5, max_size), 
+            height = pmin(abs(melted_data$Score)/5, max_size)) + 
+  scale_fill_gradient2(low = "navy", mid = "white", high = "#FF69B4", 
+                       midpoint = 0, limits = c(-20, 20), oob = scales::squish, 
+                       name = "TF Activity") + 
+  theme_minimal(base_size = 12) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, face = "bold", size = 9), 
+        axis.text.y = element_text(face = "bold", size = 10), 
+        panel.grid = element_blank(), 
+        axis.title = element_blank(), 
+        legend.title = element_text(face = "bold", size = 10), 
+        legend.text = element_text(size = 9), 
+        plot.title = element_text(face = "bold", size = 14, hjust = 0.5), 
+        plot.background = element_rect(fill = "white", color = NA), 
+        plot.margin = margin(10, 10, 10, 10)) + 
+  geom_tile(aes(x = factor(TF, levels = tf_list), y = CellType), color = "grey80", linewidth = 0.2, 
+            fill = NA, width = 1, height = 1) + 
+  coord_fixed(ratio = 0.8) + 
+  ggtitle("TF Activities in Tumor Samples by Cell Type")
+
+print(p)
+sce=subset(sce,cancer %in% c("tumor"))
+tf_of_interest <- "PLAGL2"
+tf_of_interest <- "RXRG"
+FeaturePlot(sce, features = tf_of_interest, reduction = "umap", 
+                  cols = c("lightgrey", "#FF69B4"), order = TRUE) +
+  ggtitle(paste(tf_of_interest, "Expression")) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+
+
+####distant enrichment####
+spe$seurat_trans[spe$seurat_trans %in% c("B","Plasma")]="BPC"
+spe$card[spe$card %in% c("B","Plasma")]="BPC"
+spe$rctd[spe$rctd %in% c("B","Plasma")]="BPC"
+spe$spotlight[spe$spotlight %in% c("B","Plasma")]="BPC"
+spe$seurat_trans[spe$seurat_trans %in% c("AT1.like","AT2.like","Epi.like")]="tumor"
+spe$card[spe$card %in% c("AT1.like","AT2.like","Epi.like")]="tumor"
+spe$rctd[spe$rctd %in% c("AT1.like","AT2.like","Epi.like")]="tumor"
+spe$spotlight[spe$spotlight %in% c("AT1.like","AT2.like","Epi.like")]="tumor"
+spe=JoinLayers(spe)
+spe=NormalizeData(spe)
+
+
+methods <- c("seurat_trans", "card", "rctd", "spotlight")
+cell_types <- c("BPC", "T_NK", "Endothelial", "Stroma")
+
+all_results <- list()
+
+for (method in methods) {
+  
+  message("Processing method: ", method)
+  
+  spe$anno <- spe[[method]]
+  
+  method_results <- list()
+  
+  for (cell_type in cell_types) {
+    
+    message("  Cell type: ", cell_type)
+    
+    spe$group <- NA
+    
+    near_cells_all <- c()
+    far_cells_all <- c()
+    
+    samples <- unique(spe$sample)
+    
+    for (sample_id in samples) {
+      
+      spe_sample <- subset(spe, sample == sample_id)
+      
+      tumor_cells <- colnames(spe_sample)[spe_sample$anno == "tumor"]
+      target_cells <- colnames(spe_sample)[spe_sample$anno == cell_type]
+      
+      if (length(tumor_cells) == 0 || length(target_cells) == 0) next
+      
+      coords <- GetTissueCoordinates(spe_sample)
+      rownames(coords) <- colnames(spe_sample)
+      
+      valid_tumor_cells <- tumor_cells[tumor_cells %in% rownames(coords)]
+      valid_target_cells <- target_cells[target_cells %in% rownames(coords)]
+      
+      if (length(valid_tumor_cells) == 0 || length(valid_target_cells) == 0) next
+      
+      tumor_coords <- as.matrix(coords[valid_tumor_cells, c("x", "y"), drop = FALSE])
+      target_coords <- as.matrix(coords[valid_target_cells, c("x", "y"), drop = FALSE])
+      
+      if (nrow(tumor_coords) == 0 || nrow(target_coords) == 0) next
+      
+      knn_result <- get.knnx(data = tumor_coords, query = target_coords, k = 1)
+      min_dists <- knn_result$nn.dist[, 1]
+      
+      near_idx <- valid_target_cells[min_dists <= 300]
+      far_idx <- valid_target_cells[min_dists >= 1000]
+      
+      near_cells_all <- c(near_cells_all, near_idx)
+      far_cells_all <- c(far_cells_all, far_idx)
+    }
+    
+    near_cells_all <- unique(near_cells_all)
+    far_cells_all <- unique(far_cells_all)
+    
+    near_cells_all <- setdiff(near_cells_all, far_cells_all)
+    far_cells_all <- setdiff(far_cells_all, near_cells_all)
+    
+    if (length(near_cells_all) == 0 || length(far_cells_all) == 0) {
+      warning(paste("Not enough cells for", method, cell_type))
+      method_results[[cell_type]] <- list(
+        deg = NULL,
+        gsea = NULL,
+        n_near = length(near_cells_all),
+        n_far = length(far_cells_all)
+      )
+      next
+    }
+    
+    message("    Near cells: ", length(near_cells_all), ", Far cells: ", length(far_cells_all))
+    
+    spe$group[near_cells_all] <- "near"
+    spe$group[far_cells_all] <- "far"
+    
+    spe_subset <- subset(spe, group %in% c("near", "far"))
+    
+    if (ncol(spe_subset) < 10 || length(unique(spe_subset$group)) < 2) {
+      warning(paste("Insufficient subset for", method, cell_type))
+      method_results[[cell_type]] <- list(
+        deg = NULL,
+        gsea = NULL,
+        n_near = length(near_cells_all),
+        n_far = length(far_cells_all)
+      )
+      next
+    }
+    
+    spe_subset$group <- factor(spe_subset$group, levels = c("far", "near"))
+    
+    deg <- tryCatch({
+      FindMarkers(
+        spe_subset,
+        ident.1 = "near",
+        ident.2 = "far",
+        group.by = "group"
+      )
+    }, error = function(e) NULL)
+    
+    if (is.null(deg) || nrow(deg) == 0) {
+      warning(paste("DEG failed for", method, cell_type))
+      method_results[[cell_type]] <- list(
+        deg = NULL,
+        gsea = NULL,
+        n_near = length(near_cells_all),
+        n_far = length(far_cells_all)
+      )
+      next
+    }
+    
+    deg$gene <- rownames(deg)
+    deg <- deg[, c("gene", "avg_log2FC", "p_val", "p_val_adj")]
+    colnames(deg) <- c("gene", "log2FC", "pvalue", "padj")
+    deg <- deg[order(deg$pvalue), ]
+    
+    gene_list <- deg$log2FC
+    names(gene_list) <- deg$gene
+    gene_list <- sort(gene_list, decreasing = TRUE)
+    gene_list <- gene_list[!is.na(names(gene_list))]
+    gene_list <- gene_list[!duplicated(names(gene_list))]
+    
+    eg <- tryCatch({
+      bitr(
+        names(gene_list),
+        fromType = "SYMBOL",
+        toType = "ENTREZID",
+        OrgDb = org.Hs.eg.db
+      )
+    }, error = function(e) NULL)
+    
+    gsea_result <- NULL
+    
+    if (!is.null(eg) && nrow(eg) > 0) {
+      
+      gene_list_mapped <- gene_list[eg$SYMBOL]
+      names(gene_list_mapped) <- eg$ENTREZID
+      gene_list_mapped <- gene_list_mapped[!is.na(names(gene_list_mapped))]
+      gene_list_mapped <- gene_list_mapped[!duplicated(names(gene_list_mapped))]
+      gene_list_mapped <- sort(gene_list_mapped, decreasing = TRUE)
+      
+      if (length(gene_list_mapped) >= 10) {
+        gsea_result <- tryCatch({
+          gseGO(
+            geneList = gene_list_mapped,
+            OrgDb = org.Hs.eg.db,
+            ont = "BP",
+            minGSSize = 10,
+            maxGSSize = 500,
+            pvalueCutoff = 0.05,
+            eps = 0,
+            verbose = FALSE
+          )
+        }, error = function(e) NULL)
+      }
+    }
+    
+    method_results[[cell_type]] <- list(
+      deg = deg,
+      gsea = gsea_result,
+      n_near = length(near_cells_all),
+      n_far = length(far_cells_all)
+    )
+  }
+  
+  all_results[[method]] <- method_results
+}
+
+
+cell_types <- c("BPC", "T_NK", "Endothelial", "Stroma")
+methods <- c("seurat_trans", "card", "rctd", "spotlight")
+
+selected_pathways <- list(
+  BPC = c(
+    "ribosomal small subunit assembly",
+    "ribosomal large subunit assembly", 
+    "cytoplasmic translational initiation",
+    "mitochondrial electron transport, ubiquinol to cytochrome c",
+    "protein maturation by iron-sulfur cluster transfer",
+    "cell-cell adhesion via plasma-membrane adhesion molecules",
+    "potassium ion transmembrane transport",
+    "sodium ion transmembrane transport",
+    "modulation of chemical synaptic transmission",
+    "adenylate cyclase-inhibiting G protein-coupled receptor signaling pathway"
+  ),
+  T_NK = c(
+    "cytoplasmic translation",
+    "ribosome biogenesis",
+    "ribosome assembly",
+    "oxidative phosphorylation",
+    "aerobic respiration",
+    "ATP biosynthetic process",
+    "mitochondrial gene expression",
+    "rRNA processing",
+    "positive regulation of translation",
+    "cellular respiration"
+  ),
+  Endothelial = c(
+    "cytoplasmic translation",
+    "mitochondrial translation",
+    "ribosome biogenesis",
+    "oxidative phosphorylation",
+    "ATP metabolic process",
+    "post-transcriptional regulation of gene expression",
+    "RNA localization",
+    "protein folding",
+    "regulation of receptor signaling pathway via JAK-STAT",
+    "regulation of membrane potential"
+  ),
+  Stroma = c(
+    "mitochondrial gene expression",
+    "ribonucleoprotein complex biogenesis",
+    "oxidative phosphorylation",
+    "ATP metabolic process",
+    "electron transport chain",
+    "translational initiation",
+    "RNA localization",
+    "regulation of intrinsic apoptotic signaling pathway",
+    "cell-cell adhesion via plasma-membrane adhesion molecules",
+    "regulation of receptor signaling pathway via JAK-STAT"
+  )
+)
+
+plot_list <- list()
+
+for (cell_type in cell_types) {
+  
+  all_nes <- data.frame()
+  
+  for (method in methods) {
+    gsea_res <- all_results[[method]][[cell_type]]$gsea
+    if (!is.null(gsea_res) && nrow(gsea_res@result) > 0) {
+      temp <- gsea_res@result[, c("Description", "NES", "p.adjust")]
+      temp$method <- method
+      colnames(temp) <- c("pathway", "NES", "p.adjust", "method")
+      all_nes <- rbind(all_nes, temp)
+    }
+  }
+  
+  if (nrow(all_nes) > 0) {
+    
+    selected <- selected_pathways[[cell_type]]
+    all_nes <- all_nes[all_nes$pathway %in% selected, ]
+    
+    if (nrow(all_nes) > 0) {
+      
+      pathway_summary <- aggregate(NES ~ pathway, data = all_nes, FUN = mean)
+      colnames(pathway_summary)[2] <- "mean_NES"
+      pathway_summary$min_p <- aggregate(p.adjust ~ pathway, data = all_nes, FUN = min)$p.adjust
+      pathway_summary$log10p <- -log10(pathway_summary$min_p)
+      
+      pathway_summary$pathway <- factor(pathway_summary$pathway, levels = rev(selected))
+      
+      p <- ggplot(pathway_summary, aes(x = mean_NES, y = pathway)) +
+        geom_col(aes(fill = log10p), alpha = 0.8) +
+        scale_fill_gradient(low = "blue", high = "red", 
+                            name = "-log10(p.adjust)",
+                            limits = c(0, 80),
+                            breaks = c(20, 40, 60)) +
+        geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+        coord_cartesian(xlim = c(-4, 4)) +
+        labs(title = cell_type,
+             x = "Mean NES across 4 methods", 
+             y = "") +
+        theme_classic() +
+        theme(axis.text.y = element_text(size = 8),
+              plot.title = element_text(hjust = 0.5, face = "bold"),
+              panel.grid = element_blank())
+      
+      plot_list[[cell_type]] <- p
+    }
+  }
+}
+
+if (length(plot_list) > 0) {
+  combined_plot <- wrap_plots(plot_list, ncol = 2, nrow = 2)
+  combined_plot
+}
+
+####enrichment validation####
+table(sce$cancer)
+table(sce$cell_group)
+all_pathway_genes <- list()
+for (cell_type in names(selected_pathways)) {
+  for (pathway_name in selected_pathways[[cell_type]]) {
+    
+    found <- FALSE
+    
+    for (method in c("seurat_trans", "card", "rctd", "spotlight")) {
+      gsea_res <- all_results[[method]][[cell_type]]$gsea
+      if (!is.null(gsea_res) && nrow(gsea_res@result) > 0) {
+        match_idx <- which(gsea_res@result$Description == pathway_name)
+        if (length(match_idx) > 0) {
+          core_genes <- gsea_res@result$core_enrichment[match_idx[1]]
+          entrez_ids <- unlist(strsplit(core_genes, "/"))
+          
+          symbol_map <- tryCatch({
+            bitr(entrez_ids, fromType = "ENTREZID", toType = "SYMBOL", OrgDb = org.Hs.eg.db)
+          }, error = function(e) NULL)
+          
+          if (!is.null(symbol_map) && nrow(symbol_map) > 0) {
+            gene_symbols <- symbol_map$SYMBOL
+            gene_symbols <- gene_symbols[gene_symbols %in% rownames(sce)]
+            
+            if (length(gene_symbols) > 0) {
+              key <- paste(cell_type, pathway_name, sep = "_")
+              all_pathway_genes[[key]] <- gene_symbols
+              found <- TRUE
+              break
+            }
+          }
+        }
+      }
+    }
+    
+    if (!found) {
+      warning(paste("Pathway not found:", cell_type, pathway_name))
+    }
+  }
+}
+
+if (length(all_pathway_genes) > 0) {
+  sce <- AddModuleScore(sce, features = all_pathway_genes, name = "_score")
+  
+  score_cols <- grep("_score", colnames(sce@meta.data), value = TRUE)
+  names(score_cols) <- names(all_pathway_genes)
+  
+  for (cell_type in names(selected_pathways)) {
+    
+    cell_type_keys <- grep(paste0("^", cell_type, "_"), names(score_cols), value = TRUE)
+    
+    if (length(cell_type_keys) > 0) {
+      
+      sce_subset <- sce[, sce$cell_group == cell_type]
+      
+      if (ncol(sce_subset) > 0) {
+        
+        plot_data <- data.frame()
+        
+        for (key in cell_type_keys) {
+          pathway_name <- gsub(paste0(cell_type, "_"), "", key)
+          score_vals <- as.numeric(sce_subset[[score_cols[key]]][,1])
+          
+          temp_df <- data.frame(
+            cancer = sce_subset$cancer,
+            score = score_vals,
+            pathway = pathway_name,
+            stringsAsFactors = FALSE
+          )
+          
+          plot_data <- rbind(plot_data, temp_df)
+        }
+        
+        plot_data$pathway <- factor(plot_data$pathway, levels = selected_pathways[[cell_type]])
+        
+        p <- ggplot(plot_data, aes(x = cancer, y = score, fill = cancer)) +
+          geom_boxplot(outlier.size = 0.3, alpha = 0.7) +
+          facet_wrap(~ pathway, ncol = 5, scales = "free_y") +
+          scale_fill_manual(values = c("ctrl" = "#F8766D", "tumor" = "#00BFC4")) +
+          labs(title = paste(cell_type, "- Pathway Scores"),
+               x = "Cancer Status",
+               y = "Module Score") +
+          theme_bw() +
+          theme(axis.text.x = element_text(angle = 45, hjust = 1),
+                strip.text = element_text(size = 6),
+                legend.position = "bottom")
+        
+        print(p)
+        
+        cat("\n========== ", cell_type, " ==========\n")
+        for (pw in unique(plot_data$pathway)) {
+          sub <- plot_data[plot_data$pathway == pw, ]
+          res <- wilcox.test(score ~ cancer, data = sub)
+          cat(pw, ": p-value =", signif(res$p.value, 3), "\n")
+        }
+      }
+    }
+  }
+}
+
