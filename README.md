@@ -13,6 +13,7 @@ This repository contains the complete R code for benchmarking four cell-type ann
 |-----------|--------|---------|
 | NSCLC spatial data | Human NSCLC lesions (10x Visium) | 20 |
 | LUAD spatial data | GSE307534 | 25 |
+| scRNA-seq validation | GSE131907 | 22 |
 | scRNA-seq reference | Human Cell Atlas Lung Network | 114,549 cells, 10 cell types |
 
 ---
